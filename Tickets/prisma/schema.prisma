@@ -1,0 +1,46 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./prisma/dev.db"
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String
+  email     String   @unique
+  password  String
+  role      Role     @default(USER)
+  tickets   Ticket[] @relation("UserTickets")
+  managerId Int?
+  manager   User?    @relation("ManagerEmployees", fields: [managerId], references: [id])
+  managed   User[]   @relation("ManagerEmployees")
+}
+
+model Ticket {
+  id          Int      @id @default(autoincrement())
+  title       String
+  description String
+  status      Status   @default(OPEN)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  assignedTo  User?    @relation("UserTickets", fields: [assignedToId], references: [id])
+  assignedToId Int?
+}
+
+enum Status {
+  OPEN
+  IN_PROGRESS
+  CLOSED
+}
+
+enum Role {
+  USER
+  MANAGER
+  ADMIN
+}
