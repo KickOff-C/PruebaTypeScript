@@ -1,8 +1,11 @@
+import dotenv from "dotenv";
+dotenv.config();
+
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
-import { PrismaClient, Status, Role } from "@prisma/client";
-import bcrypt from "bcrypt";
-import jwt from "jsonwebtoken";
+import { PrismaClient, Status } from "@prisma/client";
+import jwt, { JwtPayload } from "jsonwebtoken";
+import crypto from "crypto";
 
 const app = express();
 const prisma = new PrismaClient();
@@ -10,22 +13,60 @@ const prisma = new PrismaClient();
 app.use(cors());
 app.use(express.json());
 
-const SECRET = "clave_super_segura"; // ⚠️ en producción, colócalo en tu .env
+// 👉 Lee del .env y corta la ejecución si falta
+const SECRET = process.env.JWT_SECRET;
+if (!SECRET) {
+  throw new Error("Falta JWT_SECRET en .env");
+}
+// A partir de aquí, TS ya sabe que SECRET es string
+
+
 
 // --- Middleware de autenticación ---
 function auth(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
-  if (!header) return res.status(401).json({ error: "Token requerido" });
+  if (!header) {
+    return res.status(401).json({ error: "Token requerido" });
+  }
+
+  // Soporta "Bearer <token>" o solo "<token>"
+  const token = header.startsWith("Bearer ")
+    ? header.split(" ")[1]
+    : header;
+
+  if (!token) {
+    return res.status(401).json({ error: "Token no encontrado en cabecera" });
+  }
 
   try {
-    const token = header.split(" ")[1];
-    const decoded = jwt.verify(token, SECRET) as { userId: number; role: string };
-    (req as any).user = decoded;
+    const decoded = jwt.verify(token, SECRET as string) as JwtPayload;
+    const { userId, role } = decoded as { userId: number; role: string };
+    (req as any).user = { userId, role };
     next();
-  } catch {
-    res.status(403).json({ error: "Token inválido o expirado" });
+  } catch (err) {
+    console.error("JWT verify error:", err);
+    return res.status(403).json({ error: "Token inválido o expirado" });
   }
 }
+// --- Obtener información del usuario logueado ---
+app.get("/me", auth, async (req, res) => {
+  try {
+    const userData = (req as any).user;
+    const user = await prisma.user.findUnique({
+      where: { id: userData.userId },
+      select: { id: true, name: true, email: true, role: true }
+    });
+
+    if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+
+    res.json(user);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Error obteniendo datos del usuario" });
+  }
+});
+
+
 
 // --- Rutas de autenticación ---
 app.post("/register", async (req: Request, res: Response) => {
@@ -34,7 +75,7 @@ app.post("/register", async (req: Request, res: Response) => {
     if (!name || !email || !password)
       return res.status(400).json({ error: "Faltan datos" });
 
-    const hashed = await bcrypt.hash(password, 10);
+    const hashed = crypto.createHash("sha256").update(password).digest("hex");
     const user = await prisma.user.create({
       data: { name, email, password: hashed, role: role || "USER" },
     });
@@ -51,8 +92,10 @@ app.post("/login", async (req: Request, res: Response) => {
     const user = await prisma.user.findUnique({ where: { email } });
     if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
 
-    const valid = await bcrypt.compare(password, user.password);
-    if (!valid) return res.status(401).json({ error: "Contraseña incorrecta" });
+    const hashed = crypto.createHash("sha256").update(password).digest("hex");
+
+    if (hashed !== user.password)
+      return res.status(401).json({ error: "Contraseña incorrecta" });
 
     const token = jwt.sign(
       { userId: user.id, role: user.role },

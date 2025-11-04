@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import axios from "axios";
+import { api } from "./api.ts";
 
 interface Ticket {
   id: number;
@@ -9,90 +9,165 @@ interface Ticket {
   createdAt: string;
 }
 
+interface User {
+  id: number;
+  name: string;
+  email: string;
+  role: string;
+}
+
 export default function App() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [logged, setLogged] = useState(false);
+  const [user, setUser] = useState<User | null>(null); // 👈 NUEVO
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
 
+  const login = async () => {
+    try {
+      const res = await api.post("/login", { email, password });
+      localStorage.setItem("token", res.data.token);
+      setLogged(true);
+      await fetchUser(); // 👈 Cargar info del usuario
+      fetchTickets();
+    } catch {
+      alert("Error al iniciar sesión");
+    }
+  };
+
+  const logout = () => {
+    localStorage.removeItem("token");
+    setLogged(false);
+    setUser(null);
+    setTickets([]);
+  };
+
+  const fetchUser = async () => { // 👈 NUEVA FUNCIÓN
+    try {
+      const res = await api.get("/me");
+      setUser(res.data);
+    } catch (err) {
+      console.error("Error al obtener usuario", err);
+      logout();
+    }
+  };
+
   const fetchTickets = async () => {
-    const res = await axios.get("http://localhost:3000/tickets");
-    setTickets(res.data);
+    try {
+      const res = await api.get("/tickets");
+      setTickets(res.data);
+    } catch (err: any) {
+      console.error(err);
+      alert("Error cargando tickets");
+    }
   };
 
   const createTicket = async () => {
-    if (!title || !description) return;
-    await axios.post("http://localhost:3000/tickets", { title, description });
-    setTitle("");
-    setDescription("");
-    fetchTickets();
-  };
-
-  const updateTicket = async (id: number, status: string) => {
-    await axios.put(`http://localhost:3000/tickets/${id}`, { status });
-    fetchTickets();
+    try {
+      await api.post("/tickets", { title, description });
+      setTitle("");
+      setDescription("");
+      fetchTickets();
+    } catch {
+      alert("Error creando ticket");
+    }
   };
 
   useEffect(() => {
-    fetchTickets();
+    const token = localStorage.getItem("token");
+    if (token) {
+      setLogged(true);
+      fetchUser(); // 👈 cargar info del usuario al entrar
+      fetchTickets();
+    }
   }, []);
+
+  if (!logged) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-indigo-200">
+        <div className="bg-white p-8 rounded-2xl shadow-xl w-96">
+          <h1 className="text-3xl font-bold text-center mb-6 text-indigo-700">🎟️ Iniciar sesión</h1>
+          <input
+            type="email"
+            placeholder="Correo electrónico"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="w-full p-3 border border-gray-300 rounded mb-4"
+          />
+          <input
+            type="password"
+            placeholder="Contraseña"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full p-3 border border-gray-300 rounded mb-6"
+          />
+          <button
+            onClick={login}
+            className="w-full bg-indigo-600 text-white py-3 rounded font-semibold hover:bg-indigo-700 transition"
+          >
+            Entrar
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-100 to-indigo-200 flex flex-col items-center py-10 px-4">
       <div className="bg-white shadow-2xl rounded-3xl p-10 w-full max-w-3xl">
-        <h1 className="text-4xl font-extrabold text-center text-indigo-700 mb-10">
-          🎟️ Sistema de Tickets
-        </h1>
-
-        <div className="bg-gray-50 rounded-2xl p-6 shadow-inner mb-10">
-          <h2 className="text-xl font-semibold mb-4 text-gray-700">
-            Crear nuevo ticket
-          </h2>
-          <div className="space-y-4">
-            <input
-              type="text"
-              placeholder="Título del ticket"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              className="w-full border border-gray-300 rounded-md p-3 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-            />
-            <textarea
-              placeholder="Descripción detallada del problema"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              className="w-full border border-gray-300 rounded-md p-3 h-28 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-            />
-            <button
-              onClick={createTicket}
-              className="w-full bg-indigo-600 text-white py-3 rounded-md font-semibold hover:bg-indigo-700 transition"
-            >
-              Crear Ticket
-            </button>
-          </div>
+        <div className="flex justify-between items-center mb-6">
+          <h1 className="text-4xl font-extrabold text-indigo-700">🎫 Mis Tickets</h1>
+          <button onClick={logout} className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600">
+            Cerrar sesión
+          </button>
         </div>
 
-        <h2 className="text-2xl font-bold mb-6 text-gray-800 text-center">
-          Tickets registrados
-        </h2>
-
-        <div className="space-y-6">
-          {tickets.length === 0 && (
-            <p className="text-gray-500 text-center italic">
-              No hay tickets creados aún.
+        {user && ( // 👇 NUEVA SECCIÓN
+          <div className="mb-8 bg-indigo-50 border border-indigo-200 rounded-lg p-4 text-indigo-800 shadow-sm">
+            <p className="text-lg font-semibold">👋 Bienvenido, {user.name}</p>
+            <p className="text-sm text-gray-600">
+              {user.email} — <span className="font-medium">{user.role}</span>
             </p>
-          )}
+          </div>
+        )}
 
-          {tickets.map((t) => (
-            <div
-              key={t.id}
-              className="relative bg-white border border-gray-300 rounded-2xl shadow-lg p-6 overflow-hidden
-                        transition-transform transform hover:scale-[1.02] hover:shadow-2xl"
-            >
-              {/* Efecto de borde perforado */}
-              <div className="absolute top-0 left-0 w-2 h-full bg-gradient-to-b from-indigo-400 to-indigo-600"></div>
-              <div className="absolute top-0 right-0 bottom-0 w-2 bg-gray-100 border-l-2 border-dotted border-gray-300"></div>
+        {/* Crear ticket */}
+        <div className="bg-gray-50 rounded-2xl p-6 shadow-inner mb-10">
+          <h2 className="text-xl font-semibold mb-4 text-gray-700">Crear nuevo ticket</h2>
+          <input
+            type="text"
+            placeholder="Título del ticket"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            className="w-full border border-gray-300 rounded-md p-3 mb-4 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+          />
+          <textarea
+            placeholder="Descripción del problema"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            className="w-full border border-gray-300 rounded-md p-3 h-28 mb-4 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+          />
+          <button
+            onClick={createTicket}
+            className="w-full bg-indigo-600 text-white py-3 rounded-md font-semibold hover:bg-indigo-700 transition"
+          >
+            Crear Ticket
+          </button>
+        </div>
 
-              {/* Contenido */}
-              <div className="pl-6">
+        {/* Tickets */}
+        <h2 className="text-2xl font-bold mb-6 text-gray-800 text-center">Tickets registrados</h2>
+        <div className="space-y-6">
+          {tickets.length === 0 ? (
+            <p className="text-gray-500 text-center italic">No hay tickets creados aún.</p>
+          ) : (
+            tickets.map((t) => (
+              <div
+                key={t.id}
+                className="relative bg-white border border-gray-300 rounded-2xl shadow-lg p-6"
+              >
                 <div className="flex justify-between items-center mb-3">
                   <h3 className="text-2xl font-bold text-gray-800">{t.title}</h3>
                   <span
@@ -107,49 +182,13 @@ export default function App() {
                     {t.status}
                   </span>
                 </div>
-                <p className="text-gray-700 mb-4 leading-relaxed">{t.description}</p>
+                <p className="text-gray-700 mb-4">{t.description}</p>
                 <small className="text-gray-500 block mb-4">
                   Creado el {new Date(t.createdAt).toLocaleString()}
                 </small>
-
-                <div className="flex gap-3">
-                  {t.status !== "IN_PROGRESS" && (
-                    <button
-                      onClick={() => updateTicket(t.id, "IN_PROGRESS")}
-                      className="px-3 py-1 bg-yellow-500 text-white rounded-md hover:bg-yellow-600 text-sm shadow-sm"
-                    >
-                      En progreso
-                    </button>
-                  )}
-                  {t.status !== "CLOSED" && (
-                    <button
-                      onClick={() => updateTicket(t.id, "CLOSED")}
-                      className="px-3 py-1 bg-red-500 text-white rounded-md hover:bg-red-600 text-sm shadow-sm"
-                    >
-                      Cerrar
-                    </button>
-                  )}
-                </div>
               </div>
-
-              {/* Efecto de entrada animado */}
-              <style jsx>{`
-                div {
-                  animation: fadeIn 0.5s ease forwards;
-                }
-                @keyframes fadeIn {
-                  from {
-                    opacity: 0;
-                    transform: translateY(10px);
-                  }
-                  to {
-                    opacity: 1;
-                    transform: translateY(0);
-                  }
-                }
-              `}</style>
-            </div>
-          ))}
+            ))
+          )}
         </div>
       </div>
     </div>
