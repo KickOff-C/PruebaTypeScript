@@ -16,21 +16,65 @@ model User {
   email     String   @unique
   password  String
   role      Role     @default(USER)
-  tickets   Ticket[] @relation("UserTickets")
   managerId Int?
   manager   User?    @relation("ManagerEmployees", fields: [managerId], references: [id])
-  managed   User[]   @relation("ManagerEmployees")
+  employees User[]   @relation("ManagerEmployees")
+  tickets   Ticket[] @relation("UserTickets")
+
+  // 👇 Relación inversa de transferencias
+  receivedTransfers Ticket[] @relation("TicketTransferTo")
+
+  // 👇 Relaciones inversas del historial
+  sentHistory     TicketHistory[] @relation("FromUser")
+  receivedHistory TicketHistory[] @relation("ToUser")
+  comments        TicketComment[]
 }
 
 model Ticket {
-  id          Int      @id @default(autoincrement())
-  title       String
-  description String
-  status      Status   @default(OPEN)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  assignedTo  User?    @relation("UserTickets", fields: [assignedToId], references: [id])
+  id           Int      @id @default(autoincrement())
+  title        String
+  description  String
+  status       Status   @default(OPEN)
+  createdAt    DateTime @default(now())
   assignedToId Int?
+  assignedTo   User?    @relation("UserTickets", fields: [assignedToId], references: [id])
+
+  // 👇 Nueva relación para transferencia
+  transferToId   Int?
+  transferTo     User?           @relation("TicketTransferTo", fields: [transferToId], references: [id])
+  transferStatus TransferStatus  @default(NONE)
+  history        TicketHistory[]
+  comments       TicketComment[]
+  lastActivityAt DateTime @default(now())
+}
+
+model TicketComment {
+  id        Int      @id @default(autoincrement())
+  content   String
+  createdAt DateTime @default(now())
+  ticketId  Int
+  userId    Int
+  ticket    Ticket   @relation(fields: [ticketId], references: [id])
+  user      User     @relation(fields: [userId], references: [id])
+}
+
+model TicketHistory {
+  id        Int      @id @default(autoincrement())
+  ticketId  Int
+  ticket    Ticket   @relation(fields: [ticketId], references: [id])
+  fromId    Int?
+  toId      Int?
+  fromUser  User?    @relation("FromUser", fields: [fromId], references: [id])
+  toUser    User?    @relation("ToUser", fields: [toId], references: [id])
+  action    String
+  createdAt DateTime @default(now())
+}
+
+enum TransferStatus {
+  NONE
+  PENDING
+  APPROVED
+  REJECTED
 }
 
 enum Status {

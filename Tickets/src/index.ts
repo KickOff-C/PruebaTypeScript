@@ -3,7 +3,7 @@ dotenv.config();
 
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
-import { PrismaClient, Status } from "@prisma/client";
+import { PrismaClient, Status, Role } from "@prisma/client";
 import jwt, { JwtPayload } from "jsonwebtoken";
 import crypto from "crypto";
 
@@ -114,6 +114,31 @@ app.get("/", (_req, res) => {
   res.json({ ok: true, service: "tickets-api", version: "2.0" });
 });
 
+// --- Listar usuarios (solo para transferencias) ---
+app.get("/users", auth, async (req, res) => {
+  try {
+    console.log("🟡 Entró al endpoint /users"); // <-- esto debería verse apenas el front lo llame
+    const { userId } = (req as any).user;
+
+    const users = await prisma.user.findMany({
+      where: {
+        role: Role.USER,     // Usa enum (seguro, evita errores de texto)
+        NOT: { id: userId }  // No incluir al propio usuario
+      },
+      select: { id: true, name: true, email: true },
+      orderBy: { name: "asc" },
+    });
+
+    // 👇 Esto te muestra en consola si realmente encuentra usuarios
+    console.log(`🔍 Usuarios encontrados: ${users.length}`);
+
+    res.json(users);
+  } catch (error) {
+    console.error("Error en /users:", error);
+    res.status(500).json({ error: "Error cargando usuarios" });
+  }
+});
+
 // --- Crear ticket (autenticado) ---
 app.post("/tickets", auth, async (req, res) => {
   try {
@@ -163,13 +188,221 @@ app.get("/tickets", auth, async (req, res) => {
     const tickets = await prisma.ticket.findMany({
       where: whereClause,
       orderBy: { createdAt: "desc" },
-      include: { assignedTo: { select: { name: true, email: true } } },
+      include: {
+        assignedTo: { select: { name: true, email: true } },
+        comments: {
+          select: {
+            id: true,
+            content: true,
+            createdAt: true,
+            user: { select: { name: true } },
+          },
+          orderBy: { createdAt: "desc" },
+        },
+      },
     });
+
 
     res.json(tickets);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Error listando tickets" });
+  }
+});
+
+// --- Agregar comentario a un ticket ---
+app.post("/tickets/:id/comments", auth, async (req, res) => {
+  try {
+    const { userId } = (req as any).user;
+    const { content } = req.body;
+    const ticketId = Number(req.params.id);
+
+    if (!content || content.trim() === "") {
+      return res.status(400).json({ error: "El comentario no puede estar vacío" });
+    }
+
+    // Verificar que el usuario tiene asignado el ticket
+    const ticket = await prisma.ticket.findUnique({ where: { id: ticketId } });
+    if (!ticket || ticket.assignedToId !== userId) {
+      return res.status(403).json({ error: "No puedes comentar este ticket" });
+    }
+
+    // Crear comentario
+    const comment = await prisma.ticketComment.create({
+      data: { content, ticketId, userId },
+    });
+
+    // Actualizar la última actividad del ticket
+    await prisma.ticket.update({
+      where: { id: ticketId },
+      data: { lastActivityAt: new Date() },
+    });
+
+    res.status(201).json(comment);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error agregando comentario" });
+  }
+});
+
+
+// --- Obtener comentarios de un ticket ---
+app.get("/tickets/:id/comments", auth, async (req, res) => {
+  try {
+    const ticketId = Number(req.params.id);
+    const requester = (req as any).user;
+
+    const ticket = await prisma.ticket.findUnique({ where: { id: ticketId } });
+    if (!ticket) {
+      return res.status(404).json({ error: "Ticket no encontrado" });
+    }
+
+    // Permisos
+    if (
+      ticket.assignedToId !== requester.userId &&
+      requester.role !== "MANAGER" &&
+      requester.role !== "ADMIN"
+    ) {
+      return res.status(403).json({ error: "No tienes acceso a este ticket" });
+    }
+
+    const comments = await prisma.ticketComment.findMany({
+      where: { ticketId },
+      orderBy: { createdAt: "asc" },
+      include: { user: { select: { name: true, email: true } } },
+    });
+
+    res.json(comments);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error obteniendo comentarios" });
+  }
+});
+
+
+
+// --- Transferencia de ticket ---
+app.post("/tickets/:id/transfer", auth, async (req, res) => {
+  try {
+    const { userId, role } = (req as any).user;
+    const { newUserId } = req.body;
+    const ticketId = Number(req.params.id);
+
+    if (role === "MANAGER" || role === "ADMIN") {
+      return res.status(403).json({ error: "Solo usuarios pueden solicitar transferencias" });
+    }
+
+    const ticket = await prisma.ticket.findUnique({ where: { id: ticketId } });
+    if (!ticket || ticket.assignedToId !== userId) {
+      return res.status(403).json({ error: "No puedes transferir un ticket que no es tuyo" });
+    }
+
+    // 🚫 Validar estado antes de permitir transferencia
+    if (ticket.status === "CLOSED") {
+      return res.status(400).json({ error: "No se pueden transferir tickets cerrados" });
+    }
+
+    if (ticket.status !== "IN_PROGRESS") {
+      return res.status(400).json({
+        error: "Solo se pueden transferir tickets en estado 'IN_PROGRESS'",
+      });
+    }
+
+    const updated = await prisma.ticket.update({
+      where: { id: ticketId },
+      data: {
+        transferToId: newUserId,
+        transferStatus: "PENDING",
+      },
+    });
+
+    await prisma.ticketHistory.create({
+      data: {
+        ticketId,
+        fromId: userId,
+        toId: newUserId,
+        action: "Solicitud de transferencia pendiente de aprobación",
+      },
+    });
+
+    res.json(updated);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error al solicitar transferencia" });
+  }
+});
+
+
+app.post("/tickets/:id/approve-transfer", auth, async (req, res) => {
+  try {
+    const { role, userId } = (req as any).user;
+    const ticketId = Number(req.params.id);
+    const { approve } = req.body; // true o false
+
+    if (role !== "MANAGER" && role !== "ADMIN") {
+      return res.status(403).json({ error: "Solo managers o admin pueden aprobar transferencias" });
+    }
+
+    const ticket = await prisma.ticket.findUnique({
+      where: { id: ticketId },
+    });
+
+    if (!ticket || ticket.transferStatus !== "PENDING") {
+      return res.status(400).json({ error: "No hay transferencia pendiente" });
+    }
+
+    let updated;
+
+    if (approve) {
+      // ✅ Validar destino
+      if (!ticket.transferToId) {
+        return res.status(400).json({ error: "No se encontró usuario destino en la transferencia" });
+      }
+
+      console.log("Aprobando transferencia:", {
+        ticketId,
+        transferToId: ticket.transferToId,
+        assignedToId: ticket.assignedToId,
+      });
+
+      // ✅ Actualizar ticket correctamente
+      updated = await prisma.ticket.update({
+        where: { id: ticketId },
+        data: {
+          assignedToId: ticket.transferToId,
+          transferStatus: "APPROVED",
+          transferToId: null,
+        },
+      });
+
+      // ✅ Registrar historial
+      await prisma.ticketHistory.create({
+        data: {
+          ticketId: ticketId,
+          fromId: ticket.assignedToId!,
+          toId: ticket.transferToId!,
+          action: `Transferencia aprobada por manager ${userId}`,
+        },
+      });
+    } else {
+      // ❌ Transferencia rechazada
+      updated = await prisma.ticket.update({
+        where: { id: ticketId },
+        data: { transferToId: null, transferStatus: "REJECTED" },
+      });
+
+      await prisma.ticketHistory.create({
+        data: {
+          ticketId: ticketId,
+          action: `Transferencia rechazada por manager ${userId}`,
+        },
+      });
+    }
+
+    res.json(updated);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error procesando aprobación" });
   }
 });
 
@@ -209,15 +442,49 @@ app.put("/tickets/:id", auth, async (req, res) => {
 app.post("/tickets/:id/close", auth, async (req, res) => {
   try {
     const id = Number(req.params.id);
+    const { userId, role } = (req as any).user;
+
+    const ticket = await prisma.ticket.findUnique({ where: { id } });
+    if (!ticket) {
+      return res.status(404).json({ error: "Ticket no encontrado" });
+    }
+
+    // 🧠 Solo el usuario asignado, un manager o un admin puede cerrarlo
+    if (
+      ticket.assignedToId !== userId &&
+      role !== "MANAGER" &&
+      role !== "ADMIN"
+    ) {
+      return res.status(403).json({ error: "No tienes permiso para cerrar este ticket" });
+    }
+
+    // 🚫 Si ya está cerrado, prevenir re-cierre
+    if (ticket.status === "CLOSED") {
+      return res.status(400).json({ error: "El ticket ya está cerrado" });
+    }
+
+    // ✅ Cerrar el ticket
     const closed = await prisma.ticket.update({
       where: { id },
       data: { status: "CLOSED" },
     });
+
+    // 🔖 Registrar historial de cierre
+    await prisma.ticketHistory.create({
+      data: {
+        ticketId: id,
+        fromId: userId,
+        action: `Ticket cerrado por usuario con rol ${role}`,
+      },
+    });
+
     res.json(closed);
-  } catch {
-    res.status(404).json({ error: "No encontrado" });
+  } catch (err) {
+    console.error("❌ Error al cerrar ticket:", err);
+    res.status(500).json({ error: "Error al cerrar el ticket" });
   }
 });
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {

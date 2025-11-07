@@ -1,0 +1,8 @@
+# reglas globales
+* text=auto
+
+# para el frontend
+/Tickets/**/*.ts text eol=lf
+
+# para el backend
+/tickets-ui/**/*.ts text eol=lf
