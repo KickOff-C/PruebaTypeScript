@@ -189,7 +189,8 @@ app.get("/tickets", auth, async (req, res) => {
       where: whereClause,
       orderBy: { createdAt: "desc" },
       include: {
-        assignedTo: { select: { name: true, email: true } },
+        assignedTo: { select: { id: true, name: true, email: true } }, // quién lo tiene actualmente
+        transferTo: { select: { id: true, name: true, email: true } }, // a quién se quiere transferir
         comments: {
           select: {
             id: true,
@@ -201,8 +202,6 @@ app.get("/tickets", auth, async (req, res) => {
         },
       },
     });
-
-
     res.json(tickets);
   } catch (e) {
     console.error(e);
@@ -297,7 +296,7 @@ app.post("/tickets/:id/transfer", auth, async (req, res) => {
       return res.status(403).json({ error: "No puedes transferir un ticket que no es tuyo" });
     }
 
-    // 🚫 Validar estado antes de permitir transferencia
+    // Validar estado antes de permitir transferencia
     if (ticket.status === "CLOSED") {
       return res.status(400).json({ error: "No se pueden transferir tickets cerrados" });
     }
@@ -354,7 +353,7 @@ app.post("/tickets/:id/approve-transfer", auth, async (req, res) => {
     let updated;
 
     if (approve) {
-      // ✅ Validar destino
+      // Validar destino
       if (!ticket.transferToId) {
         return res.status(400).json({ error: "No se encontró usuario destino en la transferencia" });
       }
@@ -365,7 +364,7 @@ app.post("/tickets/:id/approve-transfer", auth, async (req, res) => {
         assignedToId: ticket.assignedToId,
       });
 
-      // ✅ Actualizar ticket correctamente
+      // Actualizar ticket correctamente
       updated = await prisma.ticket.update({
         where: { id: ticketId },
         data: {
@@ -375,7 +374,7 @@ app.post("/tickets/:id/approve-transfer", auth, async (req, res) => {
         },
       });
 
-      // ✅ Registrar historial
+      // Registrar historial
       await prisma.ticketHistory.create({
         data: {
           ticketId: ticketId,
@@ -385,7 +384,7 @@ app.post("/tickets/:id/approve-transfer", auth, async (req, res) => {
         },
       });
     } else {
-      // ❌ Transferencia rechazada
+      // Transferencia rechazada
       updated = await prisma.ticket.update({
         where: { id: ticketId },
         data: { transferToId: null, transferStatus: "REJECTED" },
@@ -413,30 +412,112 @@ app.get("/tickets/:id", auth, async (req, res) => {
 
   const ticket = await prisma.ticket.findUnique({
     where: { id },
-    include: { assignedTo: true },
+    include: {
+      assignedTo: { select: { id: true, name: true, email: true } },
+      transferTo: { select: { id: true, name: true, email: true } },
+     },
   });
 
   if (!ticket) return res.status(404).json({ error: "No encontrado" });
   res.json(ticket);
 });
 
-// --- Actualizar ticket ---
+// --- Obtener historial de un ticket ---
+app.get("/tickets/:id/history", auth, async (req, res) => {
+  try {
+    const ticketId = Number(req.params.id);
+    const requester = (req as any).user;
+
+    const ticket = await prisma.ticket.findUnique({ where: { id: ticketId } });
+    if (!ticket) return res.status(404).json({ error: "Ticket no encontrado" });
+
+    // Permisos: solo el asignado, managers o admins
+    if (
+      ticket.assignedToId !== requester.userId &&
+      requester.role !== "MANAGER" &&
+      requester.role !== "ADMIN"
+    ) {
+      return res.status(403).json({ error: "No tienes acceso a este historial" });
+    }
+
+    const history = await prisma.ticketHistory.findMany({
+      where: { ticketId },
+      orderBy: { createdAt: "desc" },
+      include: {
+        fromUser: { select: { name: true } },
+        toUser: { select: { name: true } },
+      },
+    });
+
+    res.json(history);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error obteniendo historial" });
+  }
+});
+
+// --- Actualizar ticket (con validación de estados realista) ---
 app.put("/tickets/:id", auth, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (Number.isNaN(id)) return res.status(400).json({ error: "id inválido" });
-    const { title, description, status } = req.body;
 
+    const { title, description, status } = req.body;
+    const { role } = (req as any).user;
+
+    const ticket = await prisma.ticket.findUnique({ where: { id } });
+    if (!ticket) return res.status(404).json({ error: "Ticket no encontrado" });
+
+    // --- Validación de transiciones ---
+    const currentStatus = ticket.status;
+
+    // Evitar reabrir tickets cerrados (salvo admin)
+    if (currentStatus === "CLOSED" && role !== "ADMIN") {
+      return res
+        .status(400)
+        .json({ error: "No puedes reabrir un ticket cerrado" });
+    }
+
+    // Transiciones válidas
+    const validTransitions: Record<Status, Status[]> = {
+      OPEN: ["IN_PROGRESS"],
+      IN_PROGRESS: ["CLOSED"],
+      CLOSED: [],
+    };
+
+    if (
+      status &&
+      !validTransitions[currentStatus].includes(status) &&
+      !(role === "ADMIN" && currentStatus === "CLOSED")
+    ) {
+      return res.status(400).json({
+        error: `Transición inválida: no puedes pasar de ${currentStatus} a ${status}`,
+      });
+    }
+
+    // --- Actualizar ticket ---
     const updated = await prisma.ticket.update({
       where: { id },
       data: { title, description, status },
     });
 
+    // Registrar en historial
+    if (status && status !== currentStatus) {
+      await prisma.ticketHistory.create({
+        data: {
+          ticketId: id,
+          action: `Estado cambiado de ${currentStatus} a ${status}`,
+        },
+      });
+    }
+
     res.json(updated);
   } catch (e) {
-    res.status(404).json({ error: "No encontrado o datos inválidos" });
+    console.error("Error actualizando ticket:", e);
+    res.status(500).json({ error: "Error actualizando ticket" });
   }
 });
+
 
 // --- Cerrar ticket ---
 app.post("/tickets/:id/close", auth, async (req, res) => {
@@ -488,5 +569,5 @@ app.post("/tickets/:id/close", auth, async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ API escuchando en http://localhost:${PORT}`);
+  console.log(`API escuchando en http://localhost:${PORT}`);
 });
