@@ -69,22 +69,50 @@ app.get("/me", auth, async (req, res) => {
 
 
 // --- Rutas de autenticación ---
+// --- Registro de usuario ---
 app.post("/register", async (req: Request, res: Response) => {
   try {
-    const { name, email, password, role } = req.body;
-    if (!name || !email || !password)
-      return res.status(400).json({ error: "Faltan datos" });
+    const { name, email, password, role, areaId } = req.body;
 
+    if (!name || !email || !password)
+      return res.status(400).json({ error: "Faltan datos obligatorios" });
+
+    // Validar que no exista el correo
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (existing)
+      return res.status(400).json({ error: "Ya existe un usuario con ese email" });
+
+    // Hashear contraseña
     const hashed = crypto.createHash("sha256").update(password).digest("hex");
+
+    // Crear usuario con área asignada (si aplica)
     const user = await prisma.user.create({
-      data: { name, email, password: hashed, role: role || "USER" },
+      data: {
+        name,
+        email,
+        password: hashed,
+        role: role || "USER",
+        areaId: areaId || null, // null si no se especifica
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        areaId: true,
+      },
     });
 
-    res.status(201).json({ id: user.id, name: user.name, email: user.email });
+    res.status(201).json({
+      message: "Usuario creado correctamente",
+      user,
+    });
   } catch (err: any) {
+    console.error("Error en /register:", err);
     res.status(500).json({ error: "Error creando usuario", detail: err.message });
   }
 });
+
 
 app.post("/login", async (req: Request, res: Response) => {
   try {
@@ -117,7 +145,7 @@ app.get("/", (_req, res) => {
 // --- Listar usuarios (solo para transferencias) ---
 app.get("/users", auth, async (req, res) => {
   try {
-    console.log("🟡 Entró al endpoint /users"); // <-- esto debería verse apenas el front lo llame
+    console.log("Entró al endpoint /users"); // <-- esto debería verse apenas el front lo llame
     const { userId } = (req as any).user;
 
     const users = await prisma.user.findMany({
@@ -130,7 +158,7 @@ app.get("/users", auth, async (req, res) => {
     });
 
     // 👇 Esto te muestra en consola si realmente encuentra usuarios
-    console.log(`🔍 Usuarios encontrados: ${users.length}`);
+    console.log(`Usuarios encontrados: ${users.length}`);
 
     res.json(users);
   } catch (error) {
@@ -142,23 +170,50 @@ app.get("/users", auth, async (req, res) => {
 // --- Crear ticket (autenticado) ---
 app.post("/tickets", auth, async (req, res) => {
   try {
-    const { title, description } = req.body;
+    const { title, description, targetAreaId } = req.body;
     const userId = (req as any).user.userId;
 
     if (!title || !description)
       return res.status(400).json({ error: "title y description son obligatorios" });
 
+    // Obtener usuario para conocer su área
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user)
+      return res.status(404).json({ error: "Usuario no encontrado" });
+
+    if (!user.areaId)
+      return res.status(400).json({ error: "Usuario sin área asignada" });
+
+    // Si no se indica un área destino, el ticket es interno (misma área)
+    const finalTargetAreaId = targetAreaId || user.areaId;
+
+    // Crear ticket con área de origen y destino
     const ticket = await prisma.ticket.create({
-      data: { title, description, assignedToId: userId },
+      data: {
+        title,
+        description,
+        assignedToId: userId,
+        areaId: user.areaId,
+        targetAreaId: finalTargetAreaId,
+      },
+      include: {
+        area: { select: { id: true, name: true } },
+        targetArea: { select: { id: true, name: true } },
+      },
     });
 
-    res.status(201).json(ticket);
+    res.status(201).json({
+      message: "Ticket creado correctamente",
+      ticket,
+    });
   } catch (e) {
+    console.error("Error creando ticket:", e);
     res.status(500).json({ error: "Error creando ticket" });
   }
 });
 
-// --- Listar tickets (con permisos según rol) ---
+
+// --- Listar tickets (con permisos según rol y área) ---
 app.get("/tickets", auth, async (req, res) => {
   try {
     const status = req.query.status as Status | undefined;
@@ -166,31 +221,48 @@ app.get("/tickets", auth, async (req, res) => {
 
     let whereClause: any = {};
 
-    // filtro por estado (opcional)
+    // Filtro opcional por estado
     if (status) whereClause.status = status;
 
-    // Usuarios normales: solo sus tickets
+    // Filtrado dinámico según rol
     if (user.role === "USER") {
+      // Solo los suyos
       whereClause.assignedToId = user.userId;
     }
 
-    // Managers: tickets de su equipo y los suyos
     if (user.role === "MANAGER") {
-      const subordinates = await prisma.user.findMany({
+      // Tickets suyos + los de su equipo
+      const managedUsers = await prisma.user.findMany({
         where: { managerId: user.userId },
         select: { id: true },
       });
-
-      const ids = subordinates.map((s) => s.id).concat(user.userId);
+      const ids = managedUsers.map((u) => u.id).concat(user.userId);
       whereClause.assignedToId = { in: ids };
     }
 
+    if (user.role === "ADMIN") {
+      // Tickets del área que administra
+      const admin = await prisma.user.findUnique({
+        where: { id: user.userId },
+        select: { areaId: true },
+      });
+      whereClause.areaId = admin?.areaId ?? undefined;
+    }
+
+    if (user.role === "SUPERADMIN") {
+      // Sin restricción: ve todo
+      whereClause = {}; 
+    }
+
+    // Obtener tickets
     const tickets = await prisma.ticket.findMany({
       where: whereClause,
       orderBy: { createdAt: "desc" },
       include: {
-        assignedTo: { select: { id: true, name: true, email: true } }, // quién lo tiene actualmente
-        transferTo: { select: { id: true, name: true, email: true } }, // a quién se quiere transferir
+        assignedTo: { select: { id: true, name: true, email: true } },
+        transferTo: { select: { id: true, name: true, email: true } },
+        area: { select: { id: true, name: true } },          // área origen
+        targetArea: { select: { id: true, name: true } },    // área destino
         comments: {
           select: {
             id: true,
@@ -202,12 +274,14 @@ app.get("/tickets", auth, async (req, res) => {
         },
       },
     });
+
     res.json(tickets);
   } catch (e) {
-    console.error(e);
+    console.error("❌ Error listando tickets:", e);
     res.status(500).json({ error: "Error listando tickets" });
   }
 });
+
 
 // --- Agregar comentario a un ticket ---
 app.post("/tickets/:id/comments", auth, async (req, res) => {
@@ -566,8 +640,115 @@ app.post("/tickets/:id/close", auth, async (req, res) => {
   }
 });
 
+// --- CRUD de Áreas (solo SUPERADMIN) ---
+app.get("/areas", auth, async (req, res) => {
+  try {
+    const { role } = (req as any).user;
+    if (role !== "SUPERADMIN") {
+      return res.status(403).json({ error: "Solo el SUPERADMIN puede listar áreas" });
+    }
+
+    const areas = await prisma.area.findMany({
+      orderBy: { name: "asc" },
+      include: {
+        users: {
+          select: { id: true, name: true, email: true, role: true },
+        },
+      },
+    });
+
+    res.json(areas);
+  } catch (err) {
+    console.error("Error obteniendo áreas:", err);
+    res.status(500).json({ error: "Error al obtener áreas" });
+  }
+});
+
+app.post("/areas", auth, async (req, res) => {
+  try {
+    const { role } = (req as any).user;
+    if (role !== "SUPERADMIN") {
+      return res.status(403).json({ error: "Solo el SUPERADMIN puede crear áreas" });
+    }
+
+    const { name } = req.body;
+    if (!name || name.trim() === "") {
+      return res.status(400).json({ error: "El nombre del área es obligatorio" });
+    }
+
+    // Validar duplicados
+    const existing = await prisma.area.findUnique({ where: { name } });
+    if (existing) {
+      return res.status(409).json({ error: "Ya existe un área con ese nombre" });
+    }
+
+    const area = await prisma.area.create({ data: { name: name.trim() } });
+    res.status(201).json(area);
+  } catch (err) {
+    console.error("Error creando área:", err);
+    res.status(500).json({ error: "Error al crear el área" });
+  }
+});
+
+// Actualizar área
+app.put("/areas/:id", auth, async (req, res) => {
+  try {
+    const { role } = (req as any).user;
+    if (role !== "SUPERADMIN") {
+      return res.status(403).json({ error: "Solo el SUPERADMIN puede modificar áreas" });
+    }
+
+    const id = Number(req.params.id);
+    const { name } = req.body;
+
+    if (!name || name.trim() === "") {
+      return res.status(400).json({ error: "El nombre es obligatorio" });
+    }
+
+    const area = await prisma.area.update({
+      where: { id },
+      data: { name: name.trim() },
+    });
+
+    res.json(area);
+  } catch (err) {
+    console.error("Error actualizando área:", err);
+    res.status(500).json({ error: "Error al actualizar el área" });
+  }
+});
+
+// Eliminar área
+app.delete("/areas/:id", auth, async (req, res) => {
+  try {
+    const { role } = (req as any).user;
+    if (role !== "SUPERADMIN") {
+      return res.status(403).json({ error: "Solo el SUPERADMIN puede eliminar áreas" });
+    }
+
+    const id = Number(req.params.id);
+
+    // Verificar que no haya usuarios o tickets asociados
+    const relatedUsers = await prisma.user.count({ where: { areaId: id } });
+    const relatedTickets = await prisma.ticket.count({
+      where: { OR: [{ areaId: id }, { targetAreaId: id }] },
+    });
+
+    if (relatedUsers > 0 || relatedTickets > 0) {
+      return res.status(400).json({
+        error: "No se puede eliminar el área: tiene usuarios o tickets asociados",
+      });
+    }
+
+    await prisma.area.delete({ where: { id } });
+    res.json({ message: "Área eliminada correctamente" });
+  } catch (err) {
+    console.error("Error eliminando área:", err);
+    res.status(500).json({ error: "Error al eliminar el área" });
+  }
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`API escuchando en http://localhost:${PORT}`);
 });
+

@@ -10,64 +10,124 @@ datasource db {
   url      = "file:./prisma/dev.db"
 }
 
-model User {
-  id        Int      @id @default(autoincrement())
-  name      String
-  email     String   @unique
-  password  String
-  role      Role     @default(USER)
-  managerId Int?
-  manager   User?    @relation("ManagerEmployees", fields: [managerId], references: [id])
-  employees User[]   @relation("ManagerEmployees")
-  tickets   Ticket[] @relation("UserTickets")
+model Area {
+  id   Int    @id @default(autoincrement())
+  name String @unique
 
-  // 👇 Relación inversa de transferencias
+  // usuarios que pertenecen a esta área
+  users User[]
+
+  // tickets cuyo ORIGEN es esta área (quién lo crea / dónde nace)
+  ticketsOrigin Ticket[] @relation("AreaOrigin")
+
+  // tickets cuyo DESTINO es esta área (quién debe resolver)
+  ticketsTarget     Ticket[] @relation("AreaTarget")
+  // transferencias recibidas hacia esta área
+  receivedTransfers Ticket[] @relation("TicketTransferToArea")
+}
+
+model User {
+  id       Int    @id @default(autoincrement())
+  name     String
+  email    String @unique
+  password String
+  role     Role   @default(USER)
+
+  // jerarquía interna
+  managerId Int?
+  manager   User?  @relation("ManagerEmployees", fields: [managerId], references: [id])
+  employees User[] @relation("ManagerEmployees")
+
+  // pertenencia a área
+  areaId Int?
+  area   Area? @relation(fields: [areaId], references: [id])
+
+  // tickets asignados al usuario
+  tickets Ticket[] @relation("UserTickets")
+
+  // transferencias recibidas (a usuario)
   receivedTransfers Ticket[] @relation("TicketTransferTo")
 
-  // 👇 Relaciones inversas del historial
+  // historial
   sentHistory     TicketHistory[] @relation("FromUser")
   receivedHistory TicketHistory[] @relation("ToUser")
-  comments        TicketComment[]
+
+  comments TicketComment[]
 }
 
 model Ticket {
-  id           Int      @id @default(autoincrement())
-  title        String
-  description  String
-  status       Status   @default(OPEN)
-  createdAt    DateTime @default(now())
-  assignedToId Int?
-  assignedTo   User?    @relation("UserTickets", fields: [assignedToId], references: [id])
-
-  // 👇 Nueva relación para transferencia
-  transferToId   Int?
-  transferTo     User?           @relation("TicketTransferTo", fields: [transferToId], references: [id])
-  transferStatus TransferStatus  @default(NONE)
-  history        TicketHistory[]
-  comments       TicketComment[]
+  id             Int      @id @default(autoincrement())
+  title          String
+  description    String
+  status         Status   @default(OPEN)
+  createdAt      DateTime @default(now())
   lastActivityAt DateTime @default(now())
+
+  // asignación a persona (puede ser null: ej. en TI hasta que alguien “tome” el ticket)
+  assignedToId Int?
+  assignedTo   User? @relation("UserTickets", fields: [assignedToId], references: [id])
+
+  // transferencia a otro usuario (opcional)
+  transferToId Int?
+  transferTo   User? @relation("TicketTransferTo", fields: [transferToId], references: [id])
+
+  // transferencia a otra área (opcional)
+  transferToAreaId Int?
+  transferToArea   Area? @relation("TicketTransferToArea", fields: [transferToAreaId], references: [id])
+
+  // estado de la solicitud de transferencia
+  transferStatus TransferStatus @default(NONE)
+
+  // ÁREA ORIGEN (donde nace el ticket)
+  areaId Int
+  area   Area @relation("AreaOrigin", fields: [areaId], references: [id])
+
+  // ÁREA DESTINO (quién debe resolver: misma área => interno; TI => solicitud a TI)
+  targetAreaId Int
+  targetArea   Area @relation("AreaTarget", fields: [targetAreaId], references: [id])
+
+  history  TicketHistory[]
+  comments TicketComment[]
+
+  @@index([areaId])
+  @@index([targetAreaId])
+  @@index([assignedToId])
+  @@index([transferToId])
+  @@index([transferToAreaId])
+  @@index([status])
 }
 
 model TicketComment {
   id        Int      @id @default(autoincrement())
   content   String
   createdAt DateTime @default(now())
-  ticketId  Int
-  userId    Int
-  ticket    Ticket   @relation(fields: [ticketId], references: [id])
-  user      User     @relation(fields: [userId], references: [id])
+
+  ticketId Int
+  userId   Int
+
+  ticket Ticket @relation(fields: [ticketId], references: [id])
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@index([ticketId])
+  @@index([userId])
 }
 
 model TicketHistory {
-  id        Int      @id @default(autoincrement())
-  ticketId  Int
-  ticket    Ticket   @relation(fields: [ticketId], references: [id])
-  fromId    Int?
-  toId      Int?
-  fromUser  User?    @relation("FromUser", fields: [fromId], references: [id])
-  toUser    User?    @relation("ToUser", fields: [toId], references: [id])
+  id       Int    @id @default(autoincrement())
+  ticketId Int
+  ticket   Ticket @relation(fields: [ticketId], references: [id])
+
+  fromId   Int?
+  toId     Int?
+  fromUser User? @relation("FromUser", fields: [fromId], references: [id])
+  toUser   User? @relation("ToUser", fields: [toId], references: [id])
+
   action    String
   createdAt DateTime @default(now())
+
+  @@index([ticketId])
+  @@index([fromId])
+  @@index([toId])
 }
 
 enum TransferStatus {
@@ -87,4 +147,5 @@ enum Role {
   USER
   MANAGER
   ADMIN
+  SUPERADMIN
 }
